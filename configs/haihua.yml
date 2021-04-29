@@ -1,0 +1,158 @@
+Global:
+  use_gpu: true
+  epochs: 12
+  fold_num: 5  # 五折交叉验证
+  only_folds: [0] # 为了加速，每个gpu 训练一个或几个fold
+  additional_tag: ''  # use to name the checkpoint for additional settings in the experiments.
+  checkpoint: &v_checkpoint  './checkpoint/esmm'
+  results_dir: './results'
+  data_base: &base /home1/heben/yezheng/ctr/data/,
+  seed: 42
+  max_len: 256  # 文本截断的最大长度
+  train_bs: 16  # batch_size，可根据自己的显存调整
+  valid_bs: 16
+  lr: 2.e-5  # 学习率
+  num_workers: 5
+  accum_iter: 2  # 梯度累积，相当于将batch_size*2. Note: paddle中不能使用
+  weight_decay: 1.e-4  # 权重衰减，防止过拟合
+  warmup_proportion: 0.1
+  dropout: None
+  pretraineds:
+    0: ["bert-base-chinese", 'bert-wwm-ext-chinese']
+    1: ['ernie-1.0', 'ernie-2.0-en']  # 'ernie-1.0'  # 0.4274, 46.481178396072
+    2: ['roberta-wwm-ext', 'roberta-wwm-ext-large']  # 'roberta-wwm-ext'
+  bert_type: 2
+  pretrained_model: 'roberta-wwm-ext'
+  is_train: true
+  is_eval: false
+  support_sen_type: 1  # 0: original 1: top_k based_on similarity.
+  top_k: 3  # choose top_k similar sentences as context (passage)
+  random_concat: false
+  is_test_run: false  # 是否测试程序完整运行。
+
+Datasets:
+  train: train.json_cosine.csv
+  test: validation.json_cosine.csv
+#  train: train.csv
+#  test: test.csv
+
+Models:
+  active: 'drmm' # which model is active. put multiple model in one place
+  'drmm':
+    embed_size: 18
+    feature_dim: 1000
+    min_by: 3 # use to decide the hash bucket, if the feature_dim is far less than 1000, we can reduce the waste.
+    share_embedding: true
+    class_weight: [ 1., 1. ]
+    mlp_ctr: [ 200, 80 ]  # [360, 200, 80]: origin paper config.
+    mlp_cvr: [ 200, 80 ]
+    dropouts: [ 0.5, 0.5 ] # [0.5, 0.5, 0.5]
+    batch_norm: false
+    activation:
+      name: LeakyReLU
+      paras:
+        alpha: 0.25 # 0.25 is the default value in x-deeplearning
+
+  'esmm_mmoe':
+    embed_size: 12
+    feature_dim: 1000
+    min_by: 3  # use to decide the hash bucket, if the feature_dim is far less than 1000, we can reduce the waste.
+    share_embedding: true
+    class_weight: [ 1., 1. ]
+    mlp_ctr: [ 320, 160, 60 ]  # [360, 200, 80]: origin paper config.
+    mlp_cvr: [ 200, 80 ]
+    dropouts: [ ] # [0.5, 0.5, 0.5]
+    batch_norm: false
+    activation:
+      name: LeakyReLU
+      paras:
+        alpha: 0.25 # 0.25 is the default value in x-deeplearning
+    units: 4
+    num_experts: 8
+    num_tasks: 2
+
+  'esmm_mmoe_add_loss':
+    embed_size: 12
+    feature_dim: 1000
+    min_by: 3  # use to decide the hash bucket, if the feature_dim is far less than 1000, we can reduce the waste.
+    share_embedding: true
+    class_weight: [ 1., 1. ]
+    mlp_ctr: [ 200, 80 ]  # [360, 200, 80]: origin paper config.
+    mlp_cvr: [ 200, 80 ]
+    dropouts: [ ] # [0.5, 0.5, 0.5]
+    batch_norm: false
+    activation:
+      name: LeakyReLU
+      paras:
+        alpha: 0.25 # 0.25 is the default value in x-deeplearning
+    units: 4
+    num_experts: 8
+    num_tasks: 3
+
+Loss: # different model may have different outputs
+  drmm:
+    name: rank_hinge_loss
+  esmm_mmoe:
+    key: [ 'ctr_output', 'ctcvr_pred', 'cvr_output' ]
+    # [direct_auc_loss, direct_auc_loss, fake_loss], [sparse_categorical_crossentropy, sparse_categorical_crossentropy, sparse_categorical_crossentropy]
+    value: [ binary_crossentropy, binary_crossentropy, binary_crossentropy_cvr ]
+    weights: [ 1., 1., 0. ]
+  esmm_mmoe_add_loss:
+    key: [ 'ctr_output', 'ctcvr_pred', 'cvr_output', 'ct_nocvr_pred' ]
+    # [direct_auc_loss, direct_auc_loss, fake_loss, direct_auc_loss],
+    value: [ binary_crossentropy, binary_crossentropy, binary_crossentropy_cvr, binary_crossentropy ]
+    weights: [ 1., 1., 0., 1. ]
+    paras:
+      alpha: 0.25
+      gamma: 2.
+
+
+Optimizer:
+  active: Adam
+  Adam:
+    lr: 0.001
+    epsilon: 1.e-08
+    decay: 0.0001
+  Adamax:
+    lr: 0.001
+  Nadam:
+    lr: 0.001
+
+Metric:
+  name: ClsMetric
+  main_indicator: acc
+
+Callbacks: # has to be in order, not used currently.
+  - ModelCheckpoint:
+      filepath: !join [ *v_checkpoint, '/hello' ]
+      save_best_only: false
+      save_freq: 'epoch'
+      monitor: 'val_loss'
+      verbose: 1
+      mode: 'min'
+  - ReduceLROnPlateau:
+      monitor: 'val_loss'
+  - EarlyStopping:
+      patience: 1
+
+Train:
+  dataset:
+    names: [ !join [ *base, 'train.0' ],
+             !join [ *base, 'train.1' ],
+             !join [ *base, 'train.2' ],
+             !join [ *base, 'train.3' ],
+             !join [ *base, 'train.4' ]
+    ]
+    batch_size: &batch_size 10
+    shuffle: false
+    buffer_size: 1000 * 5 * 10
+
+Eval:
+  dataset:
+    names: [ !join [ *base, 'test.0' ],
+             !join [ *base, 'test.1' ],
+             !join [ *base, 'test.2' ],
+             !join [ *base, 'test.3' ],
+             !join [ *base, 'test.4' ]
+    ]
+    batch_size: *batch_size
